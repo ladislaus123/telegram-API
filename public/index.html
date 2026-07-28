@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Telegram Connector</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>Telegram Connector</h1>
+        <p class="muted">Session control, test sends, and webhook management.</p>
+      </div>
+      <div class="status-pill" id="serviceStatus">Checking...</div>
+    </header>
+
+    <main class="layout">
+      <section class="panel panel-wide">
+        <div class="panel-head">
+          <h2>Connection</h2>
+          <button class="secondary" id="checkStatusBtn" type="button">Check</button>
+        </div>
+
+        <form class="form-grid" id="settingsForm">
+          <label>
+            API Base URL
+            <input id="baseUrlInput" name="baseUrl" type="url" autocomplete="off" />
+          </label>
+          <label>
+            API Key
+            <input
+              id="apiKeyInput"
+              name="apiKey"
+              type="password"
+              autocomplete="off"
+              placeholder="Bearer token"
+            />
+          </label>
+          <div class="button-row align-end">
+            <button type="submit">Save</button>
+            <button class="secondary" id="clearSettingsBtn" type="button">Clear</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel panel-wide">
+        <div class="panel-head">
+          <h2 id="sessionFormTitle">Add Session</h2>
+          <button class="secondary" id="cancelSessionEditBtn" type="button" hidden>
+            Cancel Edit
+          </button>
+        </div>
+
+        <form class="session-form" id="sessionForm">
+          <label>
+            Session Name
+            <input
+              id="sessionNameInput"
+              name="name"
+              type="text"
+              autocomplete="off"
+              placeholder="sales"
+            />
+          </label>
+          <label>
+            API ID
+            <input id="sessionApiIdInput" name="apiId" type="number" min="1" />
+          </label>
+          <label>
+            API Hash
+            <input
+              id="sessionApiHashInput"
+              name="apiHash"
+              type="password"
+              autocomplete="off"
+            />
+          </label>
+          <label>
+            Phone Number
+            <input
+              id="sessionPhoneInput"
+              name="phoneNumber"
+              type="tel"
+              autocomplete="off"
+              placeholder="+15555550123"
+            />
+          </label>
+          <label class="field-wide">
+            Existing StringSession
+            <textarea
+              id="sessionStringInput"
+              name="stringSession"
+              rows="3"
+              autocomplete="off"
+            ></textarea>
+          </label>
+          <label class="checkline">
+            <input id="sessionSendCodeInput" name="sendCode" type="checkbox" checked />
+            Send login code after save
+          </label>
+          <label class="checkline">
+            <input id="sessionStartInput" name="start" type="checkbox" />
+            Start imported StringSession
+          </label>
+          <div class="button-row align-end">
+            <button id="saveSessionBtn" type="submit">Add Session</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel panel-wide">
+        <div class="panel-head">
+          <h2>Confirm Login</h2>
+          <span class="muted">Use the code sent by Telegram. Add 2FA only if requested.</span>
+        </div>
+
+        <form class="login-form" id="loginConfirmForm">
+          <label>
+            Session
+            <input id="loginSessionInput" name="session" type="text" autocomplete="off" />
+          </label>
+          <label>
+            Login Code
+            <input id="loginCodeInput" name="code" type="text" autocomplete="one-time-code" />
+          </label>
+          <label>
+            2FA Password
+            <input id="loginPasswordInput" name="password" type="password" autocomplete="off" />
+          </label>
+          <div class="button-row align-end">
+            <button type="submit">Confirm Login</button>
+          </div>
+        </form>
+
+        <pre class="result compact-result" id="loginResult">{}</pre>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Sessions</h2>
+          <button class="secondary" id="refreshSessionsBtn" type="button">Refresh</button>
+        </div>
+
+        <div class="session-list" id="sessionsList"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Send Test</h2>
+          <span class="muted" id="activeSessionLabel">No session selected</span>
+        </div>
+
+        <form class="stack" id="sendTextForm">
+          <label>
+            Session
+            <select id="sendSessionSelect" name="session"></select>
+          </label>
+          <div class="split">
+            <label>
+              Recipient Type
+              <select id="recipientTypeInput" name="recipientType">
+                <option value="chat_id">chat_id</option>
+                <option value="username">username</option>
+                <option value="phone">phone</option>
+              </select>
+            </label>
+            <label>
+              Recipient
+              <input id="recipientValueInput" name="recipientValue" type="text" />
+            </label>
+          </div>
+          <label>
+            Text
+            <textarea id="messageTextInput" name="text" rows="4"></textarea>
+          </label>
+          <button type="submit">Send Text</button>
+        </form>
+
+        <form class="stack spacer-top" id="sendMediaForm">
+          <label>
+            Media URL
+            <input id="mediaUrlInput" name="mediaUrl" type="url" />
+          </label>
+          <label>
+            Caption
+            <input id="mediaCaptionInput" name="caption" type="text" />
+          </label>
+          <button type="submit">Send Media</button>
+        </form>
+
+        <pre class="result" id="sendResult">{}</pre>
+      </section>
+
+      <section class="panel panel-wide">
+        <div class="panel-head">
+          <h2>Webhooks</h2>
+          <button class="secondary" id="refreshWebhooksBtn" type="button">Refresh</button>
+        </div>
+
+        <form class="webhook-form" id="createWebhookForm">
+          <label class="field-wide">
+            URL
+            <input id="webhookUrlInput" name="url" type="url" />
+          </label>
+          <label>
+            Session
+            <input id="webhookSessionInput" name="session" type="text" placeholder="main or blank" />
+          </label>
+          <label>
+            Secret
+            <input id="webhookSecretInput" name="secret" type="password" />
+          </label>
+          <fieldset class="events">
+            <legend>Events</legend>
+            <label><input type="checkbox" value="message.received" checked /> message.received</label>
+            <label><input type="checkbox" value="message.edited" /> message.edited</label>
+            <label><input type="checkbox" value="message.deleted" /> message.deleted</label>
+            <label><input type="checkbox" value="message.sent" /> message.sent</label>
+            <label><input type="checkbox" value="session.status" checked /> session.status</label>
+            <label><input type="checkbox" value="session.error" checked /> session.error</label>
+          </fieldset>
+          <div class="button-row align-end">
+            <button type="submit">Create Webhook</button>
+          </div>
+        </form>
+
+        <div class="webhook-list" id="webhooksList"></div>
+      </section>
+    </main>
+
+    <div class="toast" id="toast" hidden></div>
+    <script src="/app.js" defer></script>
+  </body>
+</html>
