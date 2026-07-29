@@ -163,7 +163,9 @@ username
 phone
 ```
 
-Phone resolution is best effort and depends on Telegram contact/privacy rules.
+Phone recipients are imported internally with Telegram contact resolution before
+sending. Responses use Telegram chat IDs when a phone is resolved. Resolution is
+best effort and depends on Telegram contact/privacy rules.
 
 ## Webhooks
 

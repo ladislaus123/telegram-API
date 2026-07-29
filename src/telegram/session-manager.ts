@@ -76,6 +76,11 @@ interface MediaFileForUpload {
   cleanup: () => Promise<void>;
 }
 
+interface ResolvedRecipient {
+  entity: EntityLike;
+  chatIdFallback: string;
+}
+
 export type TelegramClientFactory = (params: {
   stringSession: string;
   apiId: number;
@@ -493,9 +498,9 @@ export class TelegramSessionManager {
     text: string,
   ): Promise<SendMessageResult> {
     const client = this.getConnectedClient(sessionName);
-    const entity = await this.resolveRecipient(client, target);
-    const sent = await client.sendMessage(entity, { message: text });
-    const result = this.toSendResult(sessionName, target, sent);
+    const recipient = await this.resolveRecipient(client, target);
+    const sent = await client.sendMessage(recipient.entity, { message: text });
+    const result = this.toSendResult(sessionName, target, recipient, sent);
 
     this.webhookDispatcher.dispatch({
       provider: 'telegram',
@@ -515,13 +520,13 @@ export class TelegramSessionManager {
     input: SendMediaInput = {},
   ): Promise<SendMessageResult> {
     const client = this.getConnectedClient(sessionName);
-    const entity = await this.resolveRecipient(client, target);
+    const recipient = await this.resolveRecipient(client, target);
     const prepared = await this.prepareOutboundMedia(mediaUrl, input.fileName);
     const upload = await this.prepareMediaFileForUpload(prepared, input);
 
     let sent: Api.Message;
     try {
-      sent = await client.sendFile(entity, {
+      sent = await client.sendFile(recipient.entity, {
         file: upload.file,
         caption: input.caption,
         forceDocument: upload.voiceNote ? false : input.forceDocument ?? input.type === 'file',
@@ -535,7 +540,7 @@ export class TelegramSessionManager {
       await prepared.cleanup();
     }
 
-    const result = this.toSendResult(sessionName, target, sent);
+    const result = this.toSendResult(sessionName, target, recipient, sent);
 
     this.webhookDispatcher.dispatch({
       provider: 'telegram',
@@ -759,11 +764,11 @@ export class TelegramSessionManager {
     limit: number,
   ): Promise<TelegramMessagePayload[]> {
     const client = this.getConnectedClient(sessionName);
-    const entity = await this.resolveRecipient(client, {
+    const recipient = await this.resolveRecipient(client, {
       type: 'chat_id',
       value: chatId,
     });
-    const messages = await client.getMessages(entity, { limit });
+    const messages = await client.getMessages(recipient.entity, { limit });
     const normalized: TelegramMessagePayload[] = [];
 
     for (const message of messages) {
@@ -793,32 +798,80 @@ export class TelegramSessionManager {
   private async resolveRecipient(
     client: TelegramClient,
     target: RecipientTarget,
-  ): Promise<EntityLike> {
+  ): Promise<ResolvedRecipient> {
     const value = target.value.trim();
     if (!value) {
       throw new HttpError(400, 'Recipient value is required.');
     }
 
     if (target.type === 'phone') {
-      const resolved = await client.invoke(
-        new Api.contacts.ResolvePhone({ phone: value }),
-      );
-      if (!resolved.peer) {
-        throw new HttpError(404, 'Telegram phone recipient could not be resolved.');
-      }
-      return resolved.peer;
+      return this.resolvePhoneRecipient(client, value);
     }
 
     if (target.type === 'username') {
-      return value.replace(/^@/, '');
+      return {
+        entity: value.replace(/^@/, ''),
+        chatIdFallback: target.value,
+      };
     }
 
     if (/^-?\d+$/.test(value)) {
       const numeric = Number(value);
-      return Number.isSafeInteger(numeric) ? numeric : bigInt(value);
+      return {
+        entity: Number.isSafeInteger(numeric) ? numeric : bigInt(value),
+        chatIdFallback: target.value,
+      };
     }
 
-    return value;
+    return {
+      entity: value,
+      chatIdFallback: target.value,
+    };
+  }
+
+  private async resolvePhoneRecipient(
+    client: TelegramClient,
+    phone: string,
+  ): Promise<ResolvedRecipient> {
+    const contact = new Api.InputPhoneContact({
+      clientId: createPhoneContactClientId(),
+      phone,
+      firstName: 'Telegram Connector',
+      lastName: '',
+    });
+
+    let imported: Api.contacts.ImportedContacts;
+    try {
+      imported = await client.invoke(
+        new Api.contacts.ImportContacts({ contacts: [contact] }),
+      );
+    } catch (error) {
+      const rpcError = readRpcErrorMessage(error);
+      if (rpcError === 'PHONE_NOT_OCCUPIED') {
+        throw new HttpError(
+          404,
+          'Telegram phone recipient could not be resolved.',
+          rpcError,
+        );
+      }
+      if (rpcError === 'PHONE_NUMBER_INVALID') {
+        throw new HttpError(400, 'Telegram rejected the phone number.', rpcError);
+      }
+      throw error;
+    }
+
+    const user = findImportedUser(imported, contact.clientId, phone);
+    if (!user?.accessHash) {
+      throw new HttpError(404, 'Telegram phone recipient could not be resolved.');
+    }
+
+    return {
+      entity: new Api.InputPeerUser({
+        userId: user.id,
+        accessHash: user.accessHash,
+      }),
+      chatIdFallback: user.id.toString(),
+    };
   }
 
   private registerEventHandlers(sessionName: string, client: TelegramClient): void {
@@ -971,21 +1024,66 @@ export class TelegramSessionManager {
   private toSendResult(
     sessionName: string,
     target: RecipientTarget,
+    recipient: ResolvedRecipient,
     message: Api.Message,
   ): SendMessageResult {
+    const messageChatId = message.chatId?.toString();
+    const chatId = messageChatId ?? recipient.chatIdFallback;
+
     return {
       message: {
         providerMessageId: String(message.id),
         session: sessionName,
-        chatId: message.chatId?.toString() ?? target.value,
+        chatId,
         status: 'sent',
       },
       raw: {
         id: String(message.id),
-        chatId: message.chatId?.toString() ?? null,
+        chatId: messageChatId ?? (target.type === 'phone' ? chatId : null),
       },
     };
   }
+}
+
+function createPhoneContactClientId() {
+  return bigInt(Date.now())
+    .multiply(1_000_000)
+    .add(Math.floor(Math.random() * 1_000_000));
+}
+
+function findImportedUser(
+  imported: Api.contacts.ImportedContacts,
+  clientId: Api.InputPhoneContact['clientId'],
+  phone: string,
+): Api.User | null {
+  const matchingImported = imported.imported.filter(
+    (contact) => contact.clientId.toString() === clientId.toString(),
+  );
+  const importedUserIds = new Set(
+    (matchingImported.length ? matchingImported : imported.imported).map((contact) =>
+      contact.userId.toString(),
+    ),
+  );
+  const userByImportedId = imported.users.find(
+    (user): user is Api.User =>
+      user instanceof Api.User && importedUserIds.has(user.id.toString()),
+  );
+  if (userByImportedId) {
+    return userByImportedId;
+  }
+
+  const normalizedPhone = normalizePhoneForComparison(phone);
+  return (
+    imported.users.find(
+      (user): user is Api.User =>
+        user instanceof Api.User &&
+        normalizePhoneForComparison(user.phone ?? '') === normalizedPhone,
+    ) ?? null
+  );
+}
+
+function normalizePhoneForComparison(value: string): string {
+  return value.replace(/\D/g, '');
 }
 
 function resolveOutboundFileName(input: {

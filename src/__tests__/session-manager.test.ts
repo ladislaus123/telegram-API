@@ -4,7 +4,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
+import bigInt from 'big-integer';
 import pino from 'pino';
+import { Api } from 'telegram';
 import { CustomFile } from 'telegram/client/uploads';
 import { HttpError } from '../http/errors';
 import { SqliteStore } from '../storage/sqlite-store';
@@ -39,6 +41,48 @@ process.exit(1);
   fs.writeFileSync(ffmpegPath, script);
   fs.chmodSync(ffmpegPath, 0o755);
   return { ffmpegPath, argsPath };
+}
+
+function createTestConfig() {
+  return {
+    telegram: {
+      apiId: null,
+      apiHash: '',
+      initialStringSession: '',
+      defaultSession: 'main',
+      downloadInboundMedia: false,
+    },
+  } as any;
+}
+
+function createImportedContactsResponse(input: {
+  clientId: Api.InputPhoneContact['clientId'];
+  userId?: string;
+  accessHash?: string | null;
+  phone?: string;
+}): Api.contacts.ImportedContacts {
+  const userId = input.userId ?? '987654321';
+  const userParams: any = {
+    id: bigInt(userId),
+    firstName: 'Imported',
+    phone: input.phone ?? '15555550123',
+  };
+
+  if (input.accessHash !== null) {
+    userParams.accessHash = bigInt(input.accessHash ?? '1122334455');
+  }
+
+  return new Api.contacts.ImportedContacts({
+    imported: [
+      new Api.ImportedContact({
+        userId: bigInt(userId),
+        clientId: input.clientId,
+      }),
+    ],
+    popularInvites: [],
+    retryContacts: [],
+    users: [new Api.User(userParams)],
+  });
 }
 
 test('storage migrates legacy sessions and boot backfills main credentials', async () => {
@@ -328,6 +372,222 @@ test('session manager reports invalid StringSession without leaking a 500', asyn
     const session = manager.getSessionStatus('bad-session');
     assert.equal(session.status, 'error');
     assert.equal(session.lastError, 'Not a valid string');
+  } finally {
+    store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('session manager imports phone contacts before text sends', async () => {
+  const { dir, dbPath } = tempDbPath();
+  const store = new SqliteStore(dbPath);
+  store.createSession({
+    name: 'main',
+    apiId: 123456,
+    apiHash: 'api-hash',
+    stringSession: 'string-session',
+  });
+
+  const calls: string[] = [];
+  let importedContact: Api.InputPhoneContact | undefined;
+  let sentEntity: unknown;
+  const manager = new TelegramSessionManager(
+    store,
+    {} as any,
+    { dispatch: () => undefined } as any,
+    createTestConfig(),
+    pino({ enabled: false }),
+    ({ stringSession }) =>
+      ({
+        connected: true,
+        connect: async () => undefined,
+        checkAuthorization: async () => true,
+        disconnect: async () => undefined,
+        addEventHandler: () => undefined,
+        invoke: async (request: any) => {
+          calls.push(request.className);
+          assert(request instanceof Api.contacts.ImportContacts);
+          importedContact = request.contacts[0];
+          return createImportedContactsResponse({
+            clientId: importedContact!.clientId,
+            userId: '987654321',
+            accessHash: '1122334455',
+            phone: '15555550123',
+          });
+        },
+        sendMessage: async (entity: unknown, params: any) => {
+          calls.push('sendMessage');
+          sentEntity = entity;
+          assert.deepEqual(params, { message: 'hello' });
+          return {
+            id: 42,
+          };
+        },
+        session: {
+          save: () => stringSession,
+        },
+      }) as any,
+  );
+
+  try {
+    await manager.startSession('main');
+    const result = await manager.sendText(
+      'main',
+      { type: 'phone', value: ' +15555550123 ' },
+      'hello',
+    );
+
+    assert.deepEqual(calls, ['contacts.ImportContacts', 'sendMessage']);
+    assert(importedContact);
+    assert.equal(importedContact.phone, '+15555550123');
+    assert.equal(importedContact.firstName, 'Telegram Connector');
+    assert.equal(importedContact.lastName, '');
+    assert(sentEntity instanceof Api.InputPeerUser);
+    assert.equal(sentEntity.userId.toString(), '987654321');
+    assert.equal(sentEntity.accessHash.toString(), '1122334455');
+    assert.equal(result.message.chatId, '987654321');
+    assert.equal((result.raw as any).chatId, '987654321');
+  } finally {
+    store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('session manager resolves phone contacts before media sends', async () => {
+  const { dir, dbPath } = tempDbPath();
+  const mediaPath = path.join(dir, 'document.txt');
+  fs.writeFileSync(mediaPath, Buffer.from('document'));
+
+  const store = new SqliteStore(dbPath);
+  store.createSession({
+    name: 'main',
+    apiId: 123456,
+    apiHash: 'api-hash',
+    stringSession: 'string-session',
+  });
+  store.createMedia({
+    id: 'document-1',
+    session: 'main',
+    messageId: null,
+    filePath: mediaPath,
+    fileName: 'document.txt',
+    mimeType: 'text/plain',
+    size: 8,
+    createdAt: '2026-07-27T18:00:00.000Z',
+  });
+
+  let sentEntity: unknown;
+  let sentParams: any;
+  const manager = new TelegramSessionManager(
+    store,
+    { getMedia: (id: string) => store.getMedia(id) } as any,
+    { dispatch: () => undefined } as any,
+    createTestConfig(),
+    pino({ enabled: false }),
+    ({ stringSession }) =>
+      ({
+        connected: true,
+        connect: async () => undefined,
+        checkAuthorization: async () => true,
+        disconnect: async () => undefined,
+        addEventHandler: () => undefined,
+        invoke: async (request: any) => {
+          assert(request instanceof Api.contacts.ImportContacts);
+          const contact = request.contacts[0] as Api.InputPhoneContact;
+          return createImportedContactsResponse({
+            clientId: contact.clientId,
+            userId: '222333444',
+            accessHash: '555666777',
+            phone: '15555550124',
+          });
+        },
+        sendFile: async (entity: unknown, params: unknown) => {
+          sentEntity = entity;
+          sentParams = params;
+          return {
+            id: 43,
+          };
+        },
+        session: {
+          save: () => stringSession,
+        },
+      }) as any,
+  );
+
+  try {
+    await manager.startSession('main');
+    const result = await manager.sendMedia(
+      'main',
+      { type: 'phone', value: '+15555550124' },
+      'http://localhost:4020/api/media/document-1',
+      { caption: 'read' },
+    );
+
+    assert(sentEntity instanceof Api.InputPeerUser);
+    assert.equal(sentEntity.userId.toString(), '222333444');
+    assert.equal(sentEntity.accessHash.toString(), '555666777');
+    assert(sentParams.file instanceof CustomFile);
+    assert.equal(sentParams.file.name, 'document.txt');
+    assert.equal(sentParams.caption, 'read');
+    assert.equal(result.message.chatId, '222333444');
+    assert.equal((result.raw as any).chatId, '222333444');
+  } finally {
+    store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('session manager returns 404 when imported phone contact has no usable user', async () => {
+  const { dir, dbPath } = tempDbPath();
+  const store = new SqliteStore(dbPath);
+  store.createSession({
+    name: 'main',
+    apiId: 123456,
+    apiHash: 'api-hash',
+    stringSession: 'string-session',
+  });
+
+  const manager = new TelegramSessionManager(
+    store,
+    {} as any,
+    { dispatch: () => undefined } as any,
+    createTestConfig(),
+    pino({ enabled: false }),
+    ({ stringSession }) =>
+      ({
+        connected: true,
+        connect: async () => undefined,
+        checkAuthorization: async () => true,
+        disconnect: async () => undefined,
+        addEventHandler: () => undefined,
+        invoke: async (request: any) => {
+          assert(request instanceof Api.contacts.ImportContacts);
+          const contact = request.contacts[0] as Api.InputPhoneContact;
+          return createImportedContactsResponse({
+            clientId: contact.clientId,
+            accessHash: null,
+          });
+        },
+        sendMessage: async () => {
+          assert.fail('sendMessage should not run when phone resolution fails');
+        },
+        session: {
+          save: () => stringSession,
+        },
+      }) as any,
+  );
+
+  try {
+    await manager.startSession('main');
+    await assert.rejects(
+      () => manager.sendText('main', { type: 'phone', value: '+15555550123' }, 'hello'),
+      (error) => {
+        assert(error instanceof HttpError);
+        assert.equal(error.statusCode, 404);
+        assert.equal(error.message, 'Telegram phone recipient could not be resolved.');
+        return true;
+      },
+    );
   } finally {
     store.close();
     fs.rmSync(dir, { recursive: true, force: true });

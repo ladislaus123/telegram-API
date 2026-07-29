@@ -107,8 +107,9 @@ Notes:
 
 - `username` may include or omit `@`.
 - `chat_id` accepts numeric Telegram IDs as strings.
-- `phone` uses Telegram phone resolution and depends on Telegram contact and
-  privacy rules.
+- `phone` is imported internally with Telegram contact resolution before
+  sending. Responses use Telegram chat IDs when a phone is resolved. Resolution
+  depends on Telegram contact and privacy rules.
 
 ### TelegramMessagePayload
 
