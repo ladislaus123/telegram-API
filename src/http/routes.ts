@@ -47,6 +47,12 @@ const sendMediaSchema = z
   })
   .strict();
 
+const resolvePhoneSchema = z
+  .object({
+    phone: z.string().trim().min(1),
+  })
+  .strict();
+
 const historyQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(100).default(50),
 });
@@ -243,6 +249,18 @@ export function createRoutes(dependencies: RouteDependencies): Router {
           forceDocument: payload.forceDocument,
           supportsStreaming: payload.supportsStreaming,
         },
+      );
+      res.status(200).json(result);
+    }),
+  );
+
+  api.post(
+    '/sessions/:session/contacts/resolve-phone',
+    asyncHandler(async (req, res) => {
+      const payload = resolvePhoneSchema.parse(req.body);
+      const result = await dependencies.sessionManager.resolvePhone(
+        readParam(req.params.session),
+        payload.phone,
       );
       res.status(200).json(result);
     }),

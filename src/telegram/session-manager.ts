@@ -513,6 +513,43 @@ export class TelegramSessionManager {
     return result;
   }
 
+  async resolvePhone(
+    sessionName: string,
+    phone: string,
+  ): Promise<{ hasTelegram: boolean; users: { id: string; username: string | null }[] }> {
+    const client = this.getConnectedClient(sessionName);
+
+    try {
+      const result = await client.invoke(new Api.contacts.ResolvePhone({ phone }));
+      const users = result.users.filter(
+        (user): user is Api.User => user instanceof Api.User,
+      );
+      return {
+        hasTelegram: users.length > 0,
+        users: users.map((user) => ({
+          id: user.id.toString(),
+          username: user.username ?? null,
+        })),
+      };
+    } catch (error) {
+      const rpcError = readRpcErrorMessage(error);
+      if (rpcError === 'PHONE_NOT_OCCUPIED' || rpcError === 'PHONE_NUMBER_UNOCCUPIED') {
+        return { hasTelegram: false, users: [] };
+      }
+      if (rpcError === 'PHONE_NUMBER_INVALID') {
+        throw new HttpError(400, 'Telegram rejected the phone number.', rpcError);
+      }
+      const floodWaitMatch = rpcError?.match(/FLOOD_WAIT_(\d+)/);
+      if (floodWaitMatch) {
+        throw new HttpError(429, 'Telegram flood wait on this session.', {
+          rpcError,
+          seconds: Number(floodWaitMatch[1]),
+        });
+      }
+      throw error;
+    }
+  }
+
   async sendMedia(
     sessionName: string,
     target: RecipientTarget,
