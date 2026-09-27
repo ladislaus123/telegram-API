@@ -557,9 +557,54 @@ export class TelegramSessionManager {
     input: SendMediaInput = {},
   ): Promise<SendMessageResult> {
     const client = this.getConnectedClient(sessionName);
-    const recipient = await this.resolveRecipient(client, target);
-    const prepared = await this.prepareOutboundMedia(mediaUrl, input.fileName);
-    const upload = await this.prepareMediaFileForUpload(prepared, input);
+    const logContext = {
+      session: sessionName,
+      recipientType: target.type,
+      recipientValue: maskRecipientValue(target.value),
+      mediaUrl,
+      fileName: input.fileName,
+      mediaType: input.type,
+    };
+
+    let recipient: ResolvedRecipient;
+    try {
+      recipient = await this.resolveRecipient(client, target);
+    } catch (error) {
+      this.logger.warn(
+        { ...logContext, err: error },
+        'Telegram media recipient resolution failed',
+      );
+      throw toTelegramRecipientHttpError(
+        error,
+        'Telegram media recipient could not be resolved.',
+      );
+    }
+
+    let prepared: PreparedOutboundMedia;
+    try {
+      prepared = await this.prepareOutboundMedia(mediaUrl, input.fileName);
+    } catch (error) {
+      this.logger.warn(
+        { ...logContext, err: error },
+        'Telegram outbound media preparation failed',
+      );
+      throw error;
+    }
+
+    let upload: MediaFileForUpload;
+    try {
+      upload = await this.prepareMediaFileForUpload(prepared, input);
+    } catch (error) {
+      await prepared.cleanup();
+      this.logger.warn(
+        { ...logContext, err: error },
+        'Telegram outbound media upload preparation failed',
+      );
+      throw toTelegramMediaPreparationHttpError(
+        error,
+        'Telegram media could not be prepared for upload.',
+      );
+    }
 
     let sent: Api.Message;
     try {
@@ -571,6 +616,10 @@ export class TelegramSessionManager {
         supportsStreaming: input.supportsStreaming ?? input.type === 'video',
       });
     } catch (error) {
+      this.logger.warn(
+        { ...logContext, err: error },
+        'Telegram media sendFile failed',
+      );
       throw toTelegramSendHttpError(error, 'Failed to send Telegram media.');
     } finally {
       await upload.cleanup();
@@ -1314,6 +1363,54 @@ function toTelegramSendHttpError(error: unknown, fallbackMessage: string): HttpE
 
   const details = rpcError ?? (error instanceof Error ? error.message : String(error));
   return new HttpError(502, fallbackMessage, details);
+}
+
+function toTelegramRecipientHttpError(error: unknown, fallbackMessage: string): HttpError {
+  if (error instanceof HttpError) {
+    return error;
+  }
+
+  const rpcError = readRpcErrorMessage(error);
+  if (rpcError === 'PHONE_NOT_OCCUPIED' || rpcError === 'PHONE_NUMBER_UNOCCUPIED') {
+    return new HttpError(404, 'Telegram phone recipient could not be resolved.', rpcError);
+  }
+  if (rpcError === 'PHONE_NUMBER_INVALID') {
+    return new HttpError(400, 'Telegram rejected the phone number.', rpcError);
+  }
+  const floodWaitMatch = rpcError?.match(/FLOOD_WAIT_(\d+)/);
+  if (floodWaitMatch) {
+    return new HttpError(429, 'Telegram flood wait while resolving recipient.', {
+      rpcError,
+      seconds: Number(floodWaitMatch[1]),
+    });
+  }
+
+  const details = rpcError ?? (error instanceof Error ? error.message : String(error));
+  return new HttpError(502, fallbackMessage, details);
+}
+
+function toTelegramMediaPreparationHttpError(
+  error: unknown,
+  fallbackMessage: string,
+): HttpError {
+  if (error instanceof HttpError) {
+    return error;
+  }
+
+  const details = error instanceof Error ? error.message : String(error);
+  return new HttpError(502, fallbackMessage, details);
+}
+
+function maskRecipientValue(value: string): string {
+  const normalized = String(value || '').trim();
+  const digits = normalized.replace(/\D/g, '');
+  if (digits.length >= 4) {
+    return `***${digits.slice(-4)}`;
+  }
+  if (normalized.startsWith('@')) {
+    return `${normalized.slice(0, 3)}***`;
+  }
+  return normalized ? '***' : '';
 }
 
 function readRpcErrorMessage(error: unknown): string | undefined {
